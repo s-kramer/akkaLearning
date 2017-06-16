@@ -1,11 +1,18 @@
 package org.skramer.learn.supervisorStrategies
 
-import akka.actor.{Actor, ActorLogging, ActorRef, ActorSystem, DeadLetter, Props}
-import akka.testkit.{TestKit, TestProbe}
+import akka.actor.SupervisorStrategy.Restart
+import akka.actor.{Actor, ActorLogging, ActorRef, ActorSystem, AllForOneStrategy, DeadLetter, OneForOneStrategy, Props, SupervisorStrategy}
+import akka.pattern.ask
+import akka.testkit.{CallingThreadDispatcher, ImplicitSender, TestKit, TestProbe}
+import akka.util.Timeout
 import org.scalatest.{Matchers, WordSpecLike}
 import org.skramer.learn.AkkaSystemClosing
+import org.skramer.learn.supervisorStrategies.StateHoldingActor.{ActorThrowCommand, AddStateCommand, GetStateCommand}
 
-class SupervisorStrategiesTest extends TestKit(ActorSystem("testSystem")) with WordSpecLike with Matchers with AkkaSystemClosing {
+import scala.concurrent.duration.DurationInt
+import scala.concurrent.{Await, Future}
+
+class SupervisorStrategiesTest extends TestKit(ActorSystem("testSystem")) with WordSpecLike with Matchers with ImplicitSender with AkkaSystemClosing {
 
   import StateHoldingActor._
 
@@ -29,6 +36,54 @@ class SupervisorStrategiesTest extends TestKit(ActorSystem("testSystem")) with W
     }
   }
 
+  "actor with custom supervision strategy" should {
+    "apply the strategy to a single child" in {
+      implicit val timeout: Timeout = 3 seconds
+
+      val parentActor = system.actorOf(Props(new OneForOneParentActor(testActor)))
+
+      val initialStateFuture = parentActor ? "state"
+      val initialState = Await.result(initialStateFuture, timeout.duration)
+      initialState shouldBe List(Vector(), Vector())
+
+      parentActor ! ("first", AddStateCommand(1))
+      parentActor ! ("second", AddStateCommand(2))
+
+      val currentStateFuture = parentActor ? "state"
+      val currentState = Await.result(currentStateFuture, timeout.duration)
+      currentState shouldBe List(Vector(1), Vector(2))
+
+      parentActor ! "throwFirst"
+
+      val stateAfterRestartFuture = parentActor ? "state"
+      val stateAfterRestart = Await.result(stateAfterRestartFuture, timeout.duration)
+      stateAfterRestart shouldBe List(Vector(), Vector(2))
+    }
+
+    "apply the strategy to all children" in {
+      implicit val timeout: Timeout = 3 seconds
+
+      val parentActor = system.actorOf(Props(new AllForOneParentActor(testActor)))
+
+      val initialStateFuture = parentActor ? "state"
+      val initialState = Await.result(initialStateFuture, timeout.duration)
+      initialState shouldBe List(Vector(), Vector())
+
+      parentActor ! ("first", AddStateCommand(1))
+      parentActor ! ("second", AddStateCommand(2))
+
+      val currentStateFuture = parentActor ? "state"
+      val currentState = Await.result(currentStateFuture, timeout.duration)
+      currentState shouldBe List(Vector(1), Vector(2))
+
+      parentActor ! "throwFirst"
+
+      val stateAfterRestartFuture = parentActor ? "state"
+      val stateAfterRestart = Await.result(stateAfterRestartFuture, timeout.duration)
+      stateAfterRestart shouldBe List(Vector(), Vector())
+    }
+  }
+
 
 }
 
@@ -40,10 +95,12 @@ object StateHoldingActor {
 
   case class GetStateCommand()
 
-  def props(receiver: ActorRef): Props = Props(new StateHoldingActor(receiver))
+  case class GetStateCommandWithResponse()
+
+  def props(receiver: ActorRef): Props = Props(new StateHoldingActor())
 }
 
-class StateHoldingActor(receiver: ActorRef) extends Actor with ActorLogging {
+class StateHoldingActor() extends Actor with ActorLogging {
   log.info("about to create state")
   private var state = Vector[Int]()
   log.info(s"state created: $state")
@@ -57,7 +114,10 @@ class StateHoldingActor(receiver: ActorRef) extends Actor with ActorLogging {
       log.info(s"extended state: $state")
     case GetStateCommand() =>
       log.info(s"returning state: $state")
-      receiver ! state
+      sender ! state
+    case GetStateCommandWithResponse() =>
+      log.info(s"returning state in response: $state")
+      sender ! state
     case _: ActorThrowCommand =>
       log.info(s"throwing exception with state: $state")
       throw new IllegalStateException("Should crash actor instance and restart state")
@@ -74,4 +134,47 @@ class NonInitializableActor() extends Actor {
     case _ =>
   }
 
+}
+
+abstract class ParentActor(recipient: ActorRef) extends Actor with ActorLogging {
+  log.info("creating children")
+  private val stateHoldingActor1 = context
+                                   .actorOf(Props(new StateHoldingActor()).withDispatcher(CallingThreadDispatcher.Id))
+  private val stateHoldingActor2 = context
+                                   .actorOf(Props(new StateHoldingActor()).withDispatcher(CallingThreadDispatcher.Id))
+  log.info("children created")
+
+  implicit val timeout: Timeout = 3 seconds
+
+  import scala.concurrent.ExecutionContext.Implicits.global
+
+  override def receive: Receive = {
+    case "throwFirst" =>
+      log.info("stateHoldingActor1 ! ctorThrowCommand")
+      stateHoldingActor1 ! ActorThrowCommand()
+    case "throwSecond" =>
+      log.info("stateHoldingActor1 ! ActorThrowCommand")
+      stateHoldingActor2 ! ActorThrowCommand()
+    case "state" =>
+      log.info("gathering states")
+      val futureResults: Future[List[Any]] = Future
+                                             .sequence(List(stateHoldingActor1 ? GetStateCommand(), stateHoldingActor2 ? GetStateCommand()))
+      import akka.pattern.pipe
+      futureResults pipeTo sender()
+
+    case ("first", msg@AddStateCommand(_)) => stateHoldingActor1 forward msg
+    case ("second", msg@AddStateCommand(_)) => stateHoldingActor2 forward msg
+  }
+}
+
+class OneForOneParentActor(recipient: ActorRef) extends ParentActor(recipient) {
+  override def supervisorStrategy: SupervisorStrategy = OneForOneStrategy() {
+    case _ => Restart
+  }
+}
+
+class AllForOneParentActor(recipient: ActorRef) extends ParentActor(recipient) {
+  override def supervisorStrategy: SupervisorStrategy = AllForOneStrategy() {
+    case _ => Restart
+  }
 }
