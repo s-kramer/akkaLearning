@@ -8,8 +8,12 @@ class ConfigurationTest extends fixture.WordSpec with Matchers {
   override type FixtureParam = Config
 
   "config factory" should {
-    "read default config" in { cf =>
+    "read config" in { cf =>
       cf.getString("AkkaLearning.envVar") shouldBe "skramer"
+    }
+
+    "read defaults from fallback config" in { cf =>
+      cf.getString("referenceConfigVar") shouldBe "reference.conf"
     }
 
     "read config subtree" in { cf =>
@@ -32,7 +36,7 @@ class ConfigurationTest extends fixture.WordSpec with Matchers {
       overridenValue shouldBe "thisIsAnOverrideOfIncludedProperty"
     }
 
-    "read overriden attributes from lifted config" in { cf =>
+    "read overridden attributes from lifted config" in { cf =>
       val liftedConfigWithFallback = cf.getConfig("SubApp").withFallback(cf)
       liftedConfigWithFallback.getString("AkkaLearning.envVar") shouldBe "skramer"
       liftedConfigWithFallback.getString("AkkaLearning.Nested.otherVar") shouldBe "overrideFromLiftedConf"
