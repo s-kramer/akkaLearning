@@ -12,5 +12,7 @@ libraryDependencies ++= Seq(
   "com.typesafe.akka" %% "akka-actor" % akkaVersion,
   "com.typesafe.akka" %% "akka-testkit" % akkaVersion % Test,
   "com.typesafe.akka" %% "akka-remote" % akkaVersion,
-  "com.typesafe.akka" %% "akka-multi-node-testkit" % akkaVersion % "test"
+  "com.typesafe.akka" %% "akka-slf4j" % akkaVersion,
+  "com.typesafe.akka" %% "akka-multi-node-testkit" % akkaVersion % "test",
+  "ch.qos.logback" % "logback-classic" % "1.2.3"
 )
