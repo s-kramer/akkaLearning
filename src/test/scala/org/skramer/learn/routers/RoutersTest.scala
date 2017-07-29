@@ -94,7 +94,7 @@ class RoutersTest extends AkkaLearningTestTrait {
 
       var senders = Set[ActorRef]()
       for (_ <- 1 to msgCount) {
-        probe.expectMsgPF(10 seconds) { case _ => senders += probe.lastSender }
+        probe.expectMsgPF() { case _ => senders += probe.lastSender }
       }
 
       senders should have size 20
