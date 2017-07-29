@@ -1,12 +1,14 @@
 package org.skramer.learn.routers
 
-import akka.actor.{ActorRef, Props}
+import akka.actor.{Actor, ActorRef, Props}
 import akka.routing._
 import akka.testkit.TestProbe
 import org.skramer.learn.AkkaLearningTestTrait
 import org.skramer.learn.forwardingActor.ForwardingActor
 
 import scala.collection.mutable.ListBuffer
+import scala.concurrent.ExecutionContext
+import scala.concurrent.duration.DurationInt
 
 class RoutersTest extends AkkaLearningTestTrait {
   "router created from source code" should {
@@ -61,6 +63,42 @@ class RoutersTest extends AkkaLearningTestTrait {
       val probe2Msgs = probe2.receiveN(2)
       probe1Msgs should contain allElementsOf (1 to 2)
       probe2Msgs should contain allElementsOf (1 to 2)
+    }
+  }
+
+  class HardWorkingActor extends Actor {
+    val random = scala.util.Random
+
+    implicit val ec: ExecutionContext = system.dispatcher
+
+    override def receive: Receive = {
+      case number: Int => system.scheduler.scheduleOnce(random.nextInt(20) milliseconds, self, (number, sender()))
+      case (number, sender: ActorRef) => sender ! number
+    }
+  }
+
+  "router with resizer" should {
+    "spawn additional children when under pressure" in {
+      val probe = TestProbe()
+
+      val router = system.actorOf(RoundRobinPool(1)
+                                  .withResizer(new DefaultResizer(lowerBound = 1, upperBound = 20, pressureThreshold = 1,
+                                    backoffRate = 0, // disable pool-actor destruction just for the sake of the test
+                                    rampupRate = 0.25, messagesPerResize = 10))
+                                  .props(Props(new HardWorkingActor)), "roundRobinWithResizer")
+
+      val msgCount = 100000
+      for (i <- 1 to msgCount) {
+        router.tell(i, probe.ref)
+      }
+
+      var senders = Set[ActorRef]()
+      for (_ <- 1 to msgCount) {
+        probe.expectMsgPF(10 seconds) { case _ => senders += probe.lastSender }
+      }
+
+      senders should have size 20
+
     }
   }
 
