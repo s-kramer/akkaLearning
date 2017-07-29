@@ -1,6 +1,7 @@
 package org.skramer.learn.routers
 
 import akka.actor.{Actor, ActorRef, Props}
+import akka.routing.ConsistentHashingRouter.{ConsistentHashMapping, ConsistentHashable, ConsistentHashableEnvelope}
 import akka.routing._
 import akka.testkit.TestProbe
 import org.skramer.learn.AkkaLearningTestTrait
@@ -116,6 +117,78 @@ class RoutersTest extends AkkaLearningTestTrait {
 
       val receivedMessages = probe.receiveN(5)
       receivedMessages.map(_.asInstanceOf[Int]) should contain allElementsOf (1 to 5)
+    }
+  }
+
+  case class IdentifiableMessage(id: Int, content: String)
+
+  case class IdentifiableMessageWithHash(id: Int, content: String) extends ConsistentHashable {
+    override def consistentHashKey: Any = id + content
+  }
+
+  case class IdentifiableMessageForEnvelope(id: Int, content: String)
+
+  case class GatheredResponse(id: Int, content: String)
+
+  "consistently hashing router" should {
+    "use the same routee for similar messages" in {
+
+      def hashingFunction: ConsistentHashMapping = {
+        case IdentifiableMessage(id, _) => id
+      }
+
+      class GatheringActor(next: ActorRef) extends Actor {
+        private var buffer = Map[Int, String]()
+
+        override def receive: Receive = {
+          case IdentifiableMessage(id, content) => bufferOrSend(id, content)
+          case IdentifiableMessageWithHash(id, content) => bufferOrSend(id, content)
+          case IdentifiableMessageForEnvelope(id, content) => bufferOrSend(id, content)
+        }
+
+        private def bufferOrSend(id: Int, content: String) = {
+          buffer.get(id) match {
+            case Some(old_content) => next ! GatheredResponse(id, content = old_content + content)
+              buffer -= id
+            case None => buffer += (id -> content)
+          }
+        }
+      }
+
+      val probe = TestProbe()
+      val router = system.actorOf(ConsistentHashingPool(10, hashMapping = hashingFunction)
+                                  .props(Props(new GatheringActor(probe.ref))))
+
+      router ! IdentifiableMessage(1, "First")
+      router ! IdentifiableMessage(2, "Second")
+
+      router ! IdentifiableMessage(1, "Third")
+      probe.expectMsg(GatheredResponse(1, "FirstThird"))
+
+      router ! IdentifiableMessage(2, "Fourth")
+      probe.expectMsg(GatheredResponse(2, "SecondFourth"))
+
+
+      router ! IdentifiableMessageWithHash(5, "Fifth")
+      router ! IdentifiableMessageWithHash(6, "Sixth")
+      router ! IdentifiableMessageWithHash(5, "Fifth")
+      router ! IdentifiableMessageWithHash(6, "Sixth")
+      probe
+      .expectMsgPF() { case GatheredResponse(5, concatenatedContents) => concatenatedContents shouldBe "FifthFifth" }
+
+      probe
+      .expectMsgPF() { case GatheredResponse(6, concatenatedContents) => concatenatedContents shouldBe "SixthSixth" }
+
+      router ! ConsistentHashableEnvelope(IdentifiableMessageForEnvelope(999, "Seventh"), 7)
+      router ! ConsistentHashableEnvelope(IdentifiableMessageForEnvelope(1000, "Eight"), 8)
+      router ! ConsistentHashableEnvelope(IdentifiableMessageForEnvelope(999, "Seventh"), 7)
+      router ! ConsistentHashableEnvelope(IdentifiableMessageForEnvelope(1000, "Eight"), 8)
+
+      probe
+      .expectMsgPF() { case GatheredResponse(999, concatenatedContents) => concatenatedContents shouldBe "SeventhSeventh" }
+
+      probe
+      .expectMsgPF() { case GatheredResponse(1000, concatenatedContents) => concatenatedContents shouldBe "EightEight" }
     }
   }
 }
